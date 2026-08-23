@@ -1,0 +1,2433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Goal Path — Break Down Goals</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React 18 & Babel Standalone -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Inter Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-in { animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+    .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen antialiased selection:bg-emerald-100 selection:text-emerald-900">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+    import {
+      getAuth,
+      signInWithPopup,
+      GoogleAuthProvider,
+      signOut,
+      onAuthStateChanged
+    } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+    import {
+      getFirestore,
+      collection,
+      query,
+      where,
+      onSnapshot,
+      addDoc,
+      updateDoc,
+      deleteDoc,
+      doc,
+      getDoc,
+      setDoc,
+      runTransaction
+    } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+    const { useState, useEffect, useMemo } = React;
+
+    // ==========================================
+    // 1. FIREBASE CONFIG & INITIALIZATION
+    // ==========================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyC7DyTPRJHQ_QYT3_CpHOC1IiaCz4Rx8CI",
+      authDomain: "goal-path-app.firebaseapp.com",
+      projectId: "goal-path-app",
+      storageBucket: "goal-path-app.firebasestorage.app",
+      messagingSenderId: "803745892418",
+      appId: "1:803745892418:web:8ed89bef4ad466e8ee45db",
+      measurementId: "G-3C4TZ08341"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const googleProvider = new GoogleAuthProvider();
+
+    // ==========================================
+    // 2. UTILS & HELPERS
+    // ==========================================
+    const getTodayDateString = () => new Date().toISOString().split('T')[0];
+
+    const getCurrentMonthKey = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    };
+
+    const formatMonthKey = (monthKey) => {
+      if (!monthKey) return '';
+      const [year, month] = monthKey.split('-');
+      const date = new Date(parseInt(year, 10), parseInt(month, 10) - 1, 1);
+      return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    };
+
+    const formatFullMonth = (monthKey) => {
+      if (!monthKey) return '';
+      const [year, month] = monthKey.split('-');
+      const date = new Date(parseInt(year, 10), parseInt(month, 10) - 1, 1);
+      return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    };
+
+    const generateMonthRange = (startKey, targetKey) => {
+      const months = [];
+      const [startYear, startMonth] = startKey.split('-').map(Number);
+      const [endYear, endMonth] = targetKey.split('-').map(Number);
+
+      let y = startYear;
+      let m = startMonth;
+
+      while (y < endYear || (y === endYear && m <= endMonth)) {
+        months.push(`${y}-${String(m).padStart(2, '0')}`);
+        m++;
+        if (m > 12) {
+          m = 1;
+          y++;
+        }
+      }
+      return months;
+    };
+
+    const PROFESSIONAL_ROLES = ['Trainer', 'Dietitian', 'Doctor'];
+    const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+    const generateInviteCode = () => {
+      let code = '';
+      for (let i = 0; i < 6; i += 1) {
+        code += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+      }
+      return code;
+    };
+
+    const requestDocId = (fromUid, toUid) => `${fromUid}_${toUid}`;
+
+    async function ensureUserProfile(firebaseUser) {
+      const userRef = doc(db, 'users', firebaseUser.uid);
+      const existing = await getDoc(userRef);
+      if (existing.exists() && existing.data().code) {
+        await updateDoc(userRef, {
+          displayName: firebaseUser.displayName || existing.data().displayName || '',
+          email: firebaseUser.email || existing.data().email || '',
+          photoURL: firebaseUser.photoURL || existing.data().photoURL || '',
+        });
+        return;
+      }
+
+      for (let i = 0; i < 10; i += 1) {
+        const code = generateInviteCode();
+        const codeRef = doc(db, 'codes', code);
+        try {
+          await runTransaction(db, async (transaction) => {
+            const codeSnap = await transaction.get(codeRef);
+            const userSnap = await transaction.get(userRef);
+            if (userSnap.exists() && userSnap.data().code) return;
+            if (codeSnap.exists()) throw new Error('CODE_TAKEN');
+            transaction.set(codeRef, { uid: firebaseUser.uid });
+            transaction.set(
+              userRef,
+              {
+                displayName: firebaseUser.displayName || '',
+                email: firebaseUser.email || '',
+                photoURL: firebaseUser.photoURL || '',
+                code,
+                collaborators: userSnap.exists() ? userSnap.data().collaborators || [] : [],
+                collaboratorUids: userSnap.exists() ? userSnap.data().collaboratorUids || [] : [],
+                createdAt: new Date().toISOString(),
+              },
+              { merge: true }
+            );
+          });
+          return;
+        } catch (err) {
+          if (String(err.message || err).includes('CODE_TAKEN')) continue;
+          throw err;
+        }
+      }
+      throw new Error('Could not generate a unique access code.');
+    }
+
+    // ==========================================
+    // 3. UI COMPONENTS & HELPERS
+    // ==========================================
+    const PriorityBadge = ({ priority }) => {
+      const colors = {
+        high: 'bg-rose-50 text-rose-700 border-rose-200',
+        medium: 'bg-amber-50 text-amber-700 border-amber-200',
+        low: 'bg-slate-100 text-slate-600 border-slate-200',
+      };
+      return (
+        <span className={`text-[10px] uppercase font-semibold px-2 py-0.5 rounded-md border ${colors[priority || 'medium']}`}>
+          {priority || 'medium'}
+        </span>
+      );
+    };
+
+    const ProgressBar = ({ value = 0, height = 'h-2' }) => (
+      <div className={`w-full bg-slate-100 rounded-full overflow-hidden ${height}`}>
+        <div
+          className="bg-emerald-600 h-full rounded-full transition-all duration-300 ease-out"
+          style={{ width: `${Math.min(100, Math.max(0, value))}%` }}
+        />
+      </div>
+    );
+
+    // ==========================================
+    // 4. LOGIN SCREEN COMPONENT
+    // ==========================================
+    const LoginScreen = ({ onLogin, loading, error }) => {
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4 bg-slate-50">
+          <div className="max-w-md w-full bg-white border border-slate-200/90 rounded-3xl p-8 shadow-sm text-center animate-in">
+            {/* Logo */}
+            <div className="w-14 h-14 bg-emerald-600 rounded-2xl flex items-center justify-center text-white text-2xl font-bold mx-auto mb-4 shadow-sm">
+              ◎
+            </div>
+
+            <h1 className="text-2xl font-bold text-slate-900">Welcome to Goal Path</h1>
+            <p className="text-slate-500 text-sm mt-1 mb-8 leading-relaxed">
+              Break multi-month goals down into sequential monthly horizons and daily momentum.
+            </p>
+
+            {error && (
+              <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs px-3.5 py-2.5 rounded-xl mb-6 text-left">
+                {error}
+              </div>
+            )}
+
+            <button
+              onClick={onLogin}
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-3 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm border border-slate-300 rounded-2xl px-5 py-3.5 shadow-xs hover:border-slate-400 transition-all cursor-pointer disabled:opacity-60"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path
+                  fill="#4285F4"
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                />
+              </svg>
+              <span>{loading ? 'Connecting...' : 'Sign in with Google'}</span>
+            </button>
+
+            <div className="mt-8 pt-6 border-t border-slate-100 flex items-center justify-center gap-4 text-xs text-slate-400">
+              <span>Cloud Sync</span>
+              <span>•</span>
+              <span>Firestore Secured</span>
+              <span>•</span>
+              <span>Cross-Device</span>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ==========================================
+    // 5. MAIN APPLICATION COMPONENT
+    // ==========================================
+    function App() {
+      // Auth State
+      const [user, setUser] = useState(null);
+      const [authLoading, setAuthLoading] = useState(true);
+      const [authError, setAuthError] = useState(null);
+
+      // Data State
+      const [goals, setGoals] = useState([]);
+      const [dataLoading, setDataLoading] = useState(true);
+      const [errorMessage, setErrorMessage] = useState(null);
+
+      // UI View State
+      const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'today' | 'detail'
+      const [selectedGoalId, setSelectedGoalId] = useState(null);
+      const [isModalOpen, setIsModalOpen] = useState(false);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [selectedCategory, setSelectedCategory] = useState('all');
+
+      // Collaborator / workspace state
+      const [profile, setProfile] = useState(null);
+      const [incomingRequests, setIncomingRequests] = useState([]);
+      const [outgoingRequests, setOutgoingRequests] = useState([]);
+      const [clientList, setClientList] = useState([]);
+      const [clientsReady, setClientsReady] = useState(false);
+      const [workspaceUid, setWorkspaceUid] = useState(null);
+      const [connectNotice, setConnectNotice] = useState(null);
+
+      // Listen for Firebase Auth State Changes
+      useEffect(() => {
+        const unsubscribe = onAuthStateChanged(
+          auth,
+          (currentUser) => {
+            setUser(currentUser);
+            setAuthLoading(false);
+          },
+          (err) => {
+            console.error('Auth state error:', err);
+            setAuthError(err.message);
+            setAuthLoading(false);
+          }
+        );
+        return () => unsubscribe();
+      }, []);
+
+      useEffect(() => {
+        if (!user) {
+          setWorkspaceUid(null);
+          setProfile(null);
+          return;
+        }
+        setWorkspaceUid((prev) => prev || user.uid);
+        ensureUserProfile(user).catch((err) => {
+          console.error('ensureUserProfile:', err);
+          setErrorMessage(
+            err.message || 'Could not set up your access code. Check Firestore rules for users/codes.'
+          );
+        });
+      }, [user]);
+
+      useEffect(() => {
+        if (!user) {
+          setProfile(null);
+          return undefined;
+        }
+        const unsub = onSnapshot(
+          doc(db, 'users', user.uid),
+          (snap) => {
+            if (snap.exists()) setProfile({ id: snap.id, ...snap.data() });
+          },
+          (err) => {
+            console.error('Profile listener:', err);
+            setErrorMessage('Unable to load your profile. Allow read/write on the users collection.');
+          }
+        );
+        return () => unsub();
+      }, [user]);
+
+      useEffect(() => {
+        if (!user) {
+          setIncomingRequests([]);
+          setOutgoingRequests([]);
+          return undefined;
+        }
+        const incomingQ = query(collection(db, 'accessRequests'), where('toUid', '==', user.uid));
+        const outgoingQ = query(collection(db, 'accessRequests'), where('fromUid', '==', user.uid));
+        const unsubIn = onSnapshot(
+          incomingQ,
+          (snap) => {
+            setIncomingRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+          },
+          (err) => console.error('Incoming requests:', err)
+        );
+        const unsubOut = onSnapshot(
+          outgoingQ,
+          (snap) => {
+            setOutgoingRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+          },
+          (err) => console.error('Outgoing requests:', err)
+        );
+        return () => {
+          unsubIn();
+          unsubOut();
+        };
+      }, [user]);
+
+      useEffect(() => {
+        if (!user) {
+          setClientList([]);
+          setClientsReady(false);
+          return undefined;
+        }
+        const clientsQ = query(
+          collection(db, 'users'),
+          where('collaboratorUids', 'array-contains', user.uid)
+        );
+        const unsub = onSnapshot(
+          clientsQ,
+          (snap) => {
+            setClientList(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+            setClientsReady(true);
+          },
+          (err) => {
+            console.error('Client list:', err);
+            setClientsReady(true);
+          }
+        );
+        return () => unsub();
+      }, [user]);
+
+      useEffect(() => {
+        if (!user || !workspaceUid || workspaceUid === user.uid) return;
+        if (!clientsReady) return;
+        if (!clientList.some((c) => c.id === workspaceUid)) {
+          setWorkspaceUid(user.uid);
+          setActiveTab('dashboard');
+          setSelectedGoalId(null);
+        }
+      }, [user, workspaceUid, clientList, clientsReady]);
+
+      // Realtime Firestore: goals for the active workspace (you, or an approved client)
+      useEffect(() => {
+        if (!user || !workspaceUid) {
+          setGoals([]);
+          setDataLoading(false);
+          return;
+        }
+
+        setDataLoading(true);
+        setErrorMessage(null);
+
+        const goalsRef = collection(db, 'goals');
+        const q = query(goalsRef, where('userId', '==', workspaceUid));
+
+        const unsubscribe = onSnapshot(
+          q,
+          (snapshot) => {
+            const fetchedGoals = [];
+            snapshot.forEach((docSnap) => {
+              fetchedGoals.push({
+                id: docSnap.id,
+                ...docSnap.data(),
+                milestones: docSnap.data().milestones || [],
+                subcategories: docSnap.data().subcategories || [],
+                tasks: docSnap.data().tasks || [],
+              });
+            });
+
+            // Sort newest first
+            fetchedGoals.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+            setGoals(fetchedGoals);
+            setDataLoading(false);
+          },
+          (error) => {
+            console.error('Firestore onSnapshot error:', error);
+            setErrorMessage('Unable to load goals from cloud storage. Please check connection.');
+            setDataLoading(false);
+          }
+        );
+
+        return () => unsubscribe();
+      }, [user, workspaceUid]);
+
+      const isOwner = !!user && workspaceUid === user.uid;
+      const workspaceProfile = isOwner
+        ? profile
+        : clientList.find((c) => c.id === workspaceUid) || null;
+      const professionalRole = isOwner
+        ? null
+        : (workspaceProfile?.collaborators || []).find((c) => c.uid === user?.uid)?.role || null;
+      const pendingIncoming = incomingRequests.filter((r) => r.status === 'pending');
+
+      const canEditSubcategoryTasks = (sub) => {
+        if (isOwner) return true;
+        return !!(sub && sub.editorRole && professionalRole && sub.editorRole === professionalRole);
+      };
+
+      const canEditTaskRecord = (goalId, task) => {
+        if (isOwner) return true;
+        const goal = goals.find((g) => g.id === goalId);
+        const sub = (goal?.subcategories || []).find((s) => s.id === task.subcategoryId);
+        return canEditSubcategoryTasks(sub);
+      };
+
+      // Computed Current Goal
+      const currentGoal = useMemo(() => {
+        return goals.find((g) => g.id === selectedGoalId) || null;
+      }, [goals, selectedGoalId]);
+
+      // Global Stats
+      const todayDate = getTodayDateString();
+      const allTodayTasks = useMemo(() => {
+        return goals.flatMap((g) =>
+          g.tasks
+            .filter((t) => t.date === todayDate)
+            .map((t) => ({
+              ...t,
+              goalTitle: g.title,
+              goalId: g.id,
+              subcategoryName:
+                (g.subcategories || []).find((s) => s.id === t.subcategoryId)?.name || '',
+              editorRole:
+                (g.subcategories || []).find((s) => s.id === t.subcategoryId)?.editorRole || null,
+            }))
+        );
+      }, [goals, todayDate]);
+
+      const totalMilestonesCount = useMemo(() => {
+        return goals.reduce((acc, g) => acc + (g.milestones ? g.milestones.length : 0), 0);
+      }, [goals]);
+
+      const completedMilestonesCount = useMemo(() => {
+        return goals.reduce(
+          (acc, g) => acc + (g.milestones ? g.milestones.filter((m) => m.completed).length : 0),
+          0
+        );
+      }, [goals]);
+
+      const overallProgress =
+        totalMilestonesCount > 0
+          ? Math.round((completedMilestonesCount / totalMilestonesCount) * 100)
+          : 0;
+
+      // Filtered Goals
+      const filteredGoals = useMemo(() => {
+        return goals.filter((g) => {
+          const matchQuery =
+            g.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            (g.description && g.description.toLowerCase().includes(searchQuery.toLowerCase()));
+          const matchCat = selectedCategory === 'all' || g.category === selectedCategory;
+          return matchQuery && matchCat;
+        });
+      }, [goals, searchQuery, selectedCategory]);
+
+      const categories = useMemo(() => {
+        const set = new Set(goals.map((g) => g.category).filter(Boolean));
+        return ['all', ...Array.from(set)];
+      }, [goals]);
+
+      // ==========================================
+      // AUTH ACTIONS
+      // ==========================================
+      const handleGoogleSignIn = async () => {
+        setAuthError(null);
+        try {
+          await signInWithPopup(auth, googleProvider);
+        } catch (err) {
+          console.error('Google Sign In Error:', err);
+          setAuthError(err.message || 'Failed to sign in with Google. Please try again.');
+        }
+      };
+
+      const handleSignOut = async () => {
+        try {
+          await signOut(auth);
+          setSelectedGoalId(null);
+          setActiveTab('dashboard');
+          setWorkspaceUid(null);
+        } catch (err) {
+          console.error('Sign Out Error:', err);
+          setErrorMessage('Failed to sign out.');
+        }
+      };
+
+      // ==========================================
+      // FIRESTORE GOAL ACTIONS
+      // ==========================================
+      const handleCreateGoal = async (newGoalData) => {
+        if (!user || !isOwner) return;
+        try {
+          const startKey = getCurrentMonthKey();
+          const months = generateMonthRange(startKey, newGoalData.targetDate);
+
+          const milestones = months.map((mKey, idx) => ({
+            id: `m-${Date.now()}-${idx}`,
+            monthKey: mKey,
+            title:
+              idx === months.length - 1
+                ? `Final: Complete ${newGoalData.title}`
+                : `Checkpoint for ${formatMonthKey(mKey)}`,
+            completed: false,
+          }));
+
+          const docData = {
+            userId: user.uid,
+            title: newGoalData.title,
+            category: newGoalData.category || 'General',
+            description: newGoalData.description || '',
+            createdAt: todayDate,
+            targetDate: newGoalData.targetDate,
+            milestones,
+            subcategories: [],
+            tasks: [],
+          };
+
+          const docRef = await addDoc(collection(db, 'goals'), docData);
+          setSelectedGoalId(docRef.id);
+          setActiveTab('detail');
+        } catch (err) {
+          console.error('Create Goal error:', err);
+          setErrorMessage('Could not save goal to Firestore. Check permissions.');
+        }
+      };
+
+      const handleDeleteGoal = async (goalId) => {
+        if (!isOwner) return;
+        if (!confirm('Are you sure you want to delete this goal?')) return;
+        try {
+          await deleteDoc(doc(db, 'goals', goalId));
+          if (selectedGoalId === goalId) {
+            setSelectedGoalId(null);
+            setActiveTab('dashboard');
+          }
+        } catch (err) {
+          console.error('Delete Goal error:', err);
+          setErrorMessage('Failed to delete goal.');
+        }
+      };
+
+      const handleToggleMilestone = async (goalId, milestoneId) => {
+        if (!isOwner) return;
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+
+        const updatedMilestones = targetGoal.milestones.map((m) =>
+          m.id === milestoneId ? { ...m, completed: !m.completed } : m
+        );
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            milestones: updatedMilestones,
+          });
+        } catch (err) {
+          console.error('Update milestone error:', err);
+          setErrorMessage('Failed to update milestone status.');
+        }
+      };
+
+      const handleUpdateMilestoneTitle = async (goalId, milestoneId, title) => {
+        if (!isOwner) return;
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+
+        const updatedMilestones = targetGoal.milestones.map((m) =>
+          m.id === milestoneId ? { ...m, title } : m
+        );
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            milestones: updatedMilestones,
+          });
+        } catch (err) {
+          console.error('Update milestone title error:', err);
+          setErrorMessage('Failed to rename milestone.');
+        }
+      };
+
+      const handleAddSubcategory = async (goalId, name) => {
+        if (!isOwner) return null;
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return null;
+
+        const newSub = {
+          id: `sc-${Date.now()}`,
+          name,
+          order: (targetGoal.subcategories || []).length,
+          editorRole: null,
+        };
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            subcategories: [...(targetGoal.subcategories || []), newSub],
+          });
+          return newSub.id;
+        } catch (err) {
+          console.error('Add subcategory error:', err);
+          setErrorMessage('Failed to add sub-category.');
+          return null;
+        }
+      };
+
+      const handleRenameSubcategory = async (goalId, subcategoryId, name) => {
+        if (!isOwner) return;
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+
+        const updatedSubcategories = (targetGoal.subcategories || []).map((s) =>
+          s.id === subcategoryId ? { ...s, name } : s
+        );
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            subcategories: updatedSubcategories,
+          });
+        } catch (err) {
+          console.error('Rename subcategory error:', err);
+          setErrorMessage('Failed to rename sub-category.');
+        }
+      };
+
+      const handleDeleteSubcategory = async (goalId, subcategoryId) => {
+        if (!isOwner) return;
+        if (!confirm('Delete this sub-category and all of its tasks?')) return;
+
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+
+        const updatedSubcategories = (targetGoal.subcategories || []).filter(
+          (s) => s.id !== subcategoryId
+        );
+        const updatedTasks = (targetGoal.tasks || []).filter((t) => t.subcategoryId !== subcategoryId);
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            subcategories: updatedSubcategories,
+            tasks: updatedTasks,
+          });
+        } catch (err) {
+          console.error('Delete subcategory error:', err);
+          setErrorMessage('Failed to delete sub-category.');
+        }
+      };
+
+      const handleSetSubcategoryRole = async (goalId, subcategoryId, editorRole) => {
+        if (!isOwner) return;
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+
+        const updatedSubcategories = (targetGoal.subcategories || []).map((s) =>
+          s.id === subcategoryId ? { ...s, editorRole: editorRole || null } : s
+        );
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            subcategories: updatedSubcategories,
+          });
+        } catch (err) {
+          console.error('Set subcategory role error:', err);
+          setErrorMessage('Failed to update sub-category access.');
+        }
+      };
+
+      const handleAddTask = async (goalId, text, priority, subcategoryId) => {
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+
+        if (!isOwner) {
+          const sub = (targetGoal.subcategories || []).find((s) => s.id === subcategoryId);
+          if (!canEditSubcategoryTasks(sub)) {
+            setErrorMessage('You can only add tasks in sub-categories tagged with your role.');
+            return;
+          }
+        }
+
+        const newTask = {
+          id: `t-${Date.now()}`,
+          text,
+          priority: priority || 'medium',
+          completed: false,
+          date: todayDate,
+          subcategoryId: subcategoryId || '',
+        };
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            tasks: [newTask, ...targetGoal.tasks],
+          });
+        } catch (err) {
+          console.error('Add task error:', err);
+          setErrorMessage('Failed to add task.');
+        }
+      };
+
+      const handleToggleTask = async (goalId, taskId) => {
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+        const task = (targetGoal.tasks || []).find((t) => t.id === taskId);
+        if (!task || !canEditTaskRecord(goalId, task)) {
+          setErrorMessage('You do not have permission to edit this task.');
+          return;
+        }
+
+        const updatedTasks = targetGoal.tasks.map((t) =>
+          t.id === taskId ? { ...t, completed: !t.completed } : t
+        );
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            tasks: updatedTasks,
+          });
+        } catch (err) {
+          console.error('Toggle task error:', err);
+          setErrorMessage('Failed to update task.');
+        }
+      };
+
+      const handleDeleteTask = async (goalId, taskId) => {
+        const targetGoal = goals.find((g) => g.id === goalId);
+        if (!targetGoal) return;
+        const task = (targetGoal.tasks || []).find((t) => t.id === taskId);
+        if (!task || !canEditTaskRecord(goalId, task)) {
+          setErrorMessage('You do not have permission to delete this task.');
+          return;
+        }
+
+        const updatedTasks = targetGoal.tasks.filter((t) => t.id !== taskId);
+
+        try {
+          await updateDoc(doc(db, 'goals', goalId), {
+            tasks: updatedTasks,
+          });
+        } catch (err) {
+          console.error('Delete task error:', err);
+          setErrorMessage('Failed to delete task.');
+        }
+      };
+
+      const handleRequestAccess = async (rawCode, role) => {
+        setConnectNotice(null);
+        const code = (rawCode || '').trim().toUpperCase();
+        if (!code || code.length !== 6) {
+          setConnectNotice({ type: 'error', text: 'Enter a 6-character access code.' });
+          return;
+        }
+        if (!PROFESSIONAL_ROLES.includes(role)) {
+          setConnectNotice({ type: 'error', text: 'Choose a professional role.' });
+          return;
+        }
+        if (profile?.code && code === profile.code) {
+          setConnectNotice({ type: 'error', text: 'That is your own code. Share it with a client instead.' });
+          return;
+        }
+
+        try {
+          const codeSnap = await getDoc(doc(db, 'codes', code));
+          if (!codeSnap.exists()) {
+            setConnectNotice({ type: 'error', text: 'No account found for that code.' });
+            return;
+          }
+          const toUid = codeSnap.data().uid;
+          if (toUid === user.uid) {
+            setConnectNotice({ type: 'error', text: 'You cannot connect to your own account.' });
+            return;
+          }
+
+          const reqRef = doc(db, 'accessRequests', requestDocId(user.uid, toUid));
+          const existing = await getDoc(reqRef);
+          if (existing.exists()) {
+            const status = existing.data().status;
+            if (status === 'pending') {
+              setConnectNotice({ type: 'error', text: 'A request is already waiting for this client.' });
+              return;
+            }
+            if (status === 'approved') {
+              setConnectNotice({ type: 'error', text: 'You already have access to this client.' });
+              return;
+            }
+          }
+
+          await setDoc(reqRef, {
+            fromUid: user.uid,
+            fromName: user.displayName || user.email || 'Professional',
+            fromEmail: user.email || '',
+            fromPhoto: user.photoURL || '',
+            toUid,
+            toCode: code,
+            role,
+            status: 'pending',
+            createdAt: new Date().toISOString(),
+          });
+          setConnectNotice({ type: 'ok', text: 'Request sent. The client must approve it.' });
+        } catch (err) {
+          console.error('Request access error:', err);
+          setConnectNotice({
+            type: 'error',
+            text: 'Could not send request. Check Firestore rules for codes and accessRequests.',
+          });
+        }
+      };
+
+      const handleApproveRequest = async (request) => {
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          const fresh = await getDoc(userRef);
+          const data = fresh.data() || {};
+          const collaborators = data.collaborators || [];
+          const collaboratorUids = data.collaboratorUids || [];
+
+          if (!collaboratorUids.includes(request.fromUid)) {
+            await updateDoc(userRef, {
+              collaborators: [
+                ...collaborators,
+                {
+                  uid: request.fromUid,
+                  role: request.role,
+                  addedAt: new Date().toISOString(),
+                  name: request.fromName || '',
+                  email: request.fromEmail || '',
+                },
+              ],
+              collaboratorUids: [...collaboratorUids, request.fromUid],
+            });
+          }
+
+          await updateDoc(doc(db, 'accessRequests', request.id), { status: 'approved' });
+        } catch (err) {
+          console.error('Approve request error:', err);
+          setErrorMessage('Failed to approve request.');
+        }
+      };
+
+      const handleDenyRequest = async (request) => {
+        try {
+          await updateDoc(doc(db, 'accessRequests', request.id), { status: 'denied' });
+        } catch (err) {
+          console.error('Deny request error:', err);
+          setErrorMessage('Failed to deny request.');
+        }
+      };
+
+      const handleRemoveCollaborator = async (professionalUid) => {
+        if (!confirm('Remove this professional’s access to your account?')) return;
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          const fresh = await getDoc(userRef);
+          const data = fresh.data() || {};
+          await updateDoc(userRef, {
+            collaborators: (data.collaborators || []).filter((c) => c.uid !== professionalUid),
+            collaboratorUids: (data.collaboratorUids || []).filter((id) => id !== professionalUid),
+          });
+          const reqRef = doc(db, 'accessRequests', requestDocId(professionalUid, user.uid));
+          const reqSnap = await getDoc(reqRef);
+          if (reqSnap.exists()) {
+            await updateDoc(reqRef, { status: 'removed' });
+          }
+        } catch (err) {
+          console.error('Remove collaborator error:', err);
+          setErrorMessage('Failed to remove access.');
+        }
+      };
+
+      const handleSwitchWorkspace = (uid) => {
+        setWorkspaceUid(uid);
+        setSelectedGoalId(null);
+        setActiveTab('dashboard');
+      };
+
+      // ==========================================
+      // RENDER: LOADING & LOGIN GATES
+      // ==========================================
+      if (authLoading) {
+        return (
+          <div className="min-h-screen flex items-center justify-center bg-slate-50">
+            <div className="flex flex-col items-center gap-3">
+              <div className="w-8 h-8 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></div>
+              <span className="text-xs font-semibold text-slate-500">Checking authentication...</span>
+            </div>
+          </div>
+        );
+      }
+
+      if (!user) {
+        return (
+          <LoginScreen
+            onLogin={handleGoogleSignIn}
+            loading={authLoading}
+            error={authError}
+          />
+        );
+      }
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          {/* ERROR NOTIFICATION BANNER */}
+          {errorMessage && (
+            <div className="bg-rose-50 border-b border-rose-200 px-4 py-2 text-xs text-rose-700 flex items-center justify-between">
+              <span>{errorMessage}</span>
+              <button
+                onClick={() => setErrorMessage(null)}
+                className="font-bold text-rose-500 hover:text-rose-800 ml-4"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* TOP NAVIGATION BAR */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              {/* Logo / Brand */}
+              <div
+                onClick={() => {
+                  setSelectedGoalId(null);
+                  setActiveTab('dashboard');
+                }}
+                className="flex items-center gap-3 cursor-pointer select-none group"
+              >
+                <div className="w-9 h-9 rounded-xl bg-emerald-600 group-hover:bg-emerald-700 transition flex items-center justify-center text-white font-bold text-lg shadow-sm">
+                  ◎
+                </div>
+                <div>
+                  <div className="font-bold text-slate-900 leading-none text-base">Goal Path</div>
+                  <span className="text-[11px] text-slate-400 font-medium">Daily & Monthly Alignment</span>
+                </div>
+              </div>
+
+              {/* View Switcher Tabs */}
+              <nav className="flex items-center bg-slate-100 p-1 rounded-xl gap-1 text-xs font-semibold">
+                <button
+                  onClick={() => {
+                    setSelectedGoalId(null);
+                    setActiveTab('dashboard');
+                  }}
+                  className={`px-3 py-1.5 rounded-lg transition ${
+                    activeTab === 'dashboard'
+                      ? 'bg-white text-slate-900 shadow-xs font-bold'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  All Goals ({goals.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab('today')}
+                  className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 ${
+                    activeTab === 'today'
+                      ? 'bg-white text-slate-900 shadow-xs font-bold'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <span>Today's Focus</span>
+                  <span className="bg-emerald-100 text-emerald-800 text-[10px] px-1.5 py-0.2 rounded-full font-bold">
+                    {allTodayTasks.filter((t) => !t.completed).length}
+                  </span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('connect')}
+                  className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 ${
+                    activeTab === 'connect'
+                      ? 'bg-white text-slate-900 shadow-xs font-bold'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <span>Collaborate</span>
+                  {pendingIncoming.length > 0 && (
+                    <span className="bg-amber-100 text-amber-800 text-[10px] px-1.5 rounded-full font-bold">
+                      {pendingIncoming.length}
+                    </span>
+                  )}
+                </button>
+              </nav>
+
+              {/* Action Buttons & User Menu */}
+              <div className="flex items-center gap-2 sm:gap-3">
+                {isOwner && (
+                  <button
+                    onClick={() => setIsModalOpen(true)}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm px-3.5 py-2 rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span>+</span>
+                    <span className="hidden sm:inline">New Goal</span>
+                  </button>
+                )}
+
+                {/* User Avatar + Sign Out */}
+                <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+                  {user.photoURL ? (
+                    <img
+                      src={user.photoURL}
+                      alt={user.displayName || 'User'}
+                      className="w-7 h-7 rounded-full border border-slate-200"
+                    />
+                  ) : (
+                    <div className="w-7 h-7 rounded-full bg-slate-200 flex items-center justify-center text-xs font-bold text-slate-700">
+                      {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleSignOut}
+                    title="Sign Out"
+                    className="text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 px-2.5 py-1.5 rounded-lg transition cursor-pointer"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {!isOwner && workspaceProfile && (
+            <div className="bg-slate-900 text-white px-4 py-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <span>
+                Viewing <span className="font-semibold">{workspaceProfile.displayName || workspaceProfile.email || 'client'}</span>
+                ’s goals as <span className="font-semibold">{professionalRole || 'Professional'}</span>
+                . Full view; you can only edit sub-categories tagged with your role.
+              </span>
+              <button
+                type="button"
+                onClick={() => handleSwitchWorkspace(user.uid)}
+                className="self-start sm:self-auto bg-white/10 hover:bg-white/20 px-3 py-1 rounded-lg font-semibold cursor-pointer"
+              >
+                Back to my account
+              </button>
+            </div>
+          )}
+
+          {/* MAIN CONTAINER */}
+          <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 flex-1 w-full">
+            {dataLoading && activeTab !== 'connect' ? (
+              <div className="text-center py-20">
+                <div className="w-8 h-8 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+                <span className="text-xs font-semibold text-slate-400">Loading your goals from cloud...</span>
+              </div>
+            ) : (
+              <>
+                {/* =========================================================
+                    VIEW 1: ALL GOALS DASHBOARD
+                   ========================================================= */}
+                {activeTab === 'dashboard' && (
+                  <div className="space-y-6 animate-in">
+                    {/* Dashboard Metrics Banner */}
+                    <div className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-6">
+                      <div>
+                        <span className="text-xs font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-md">
+                          Cloud Synced Roadmap
+                        </span>
+                        <h1 className="text-2xl font-bold text-slate-900 mt-2">Transform Vision Into Milestones</h1>
+                        <p className="text-slate-500 text-sm mt-0.5 max-w-xl">
+                          Signed in as <span className="font-semibold text-slate-700">{user.displayName || user.email}</span>. Your roadmaps are backed up securely.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-6 border-t md:border-t-0 pt-4 md:pt-0 border-slate-100">
+                        <div>
+                          <div className="text-2xl font-extrabold text-slate-900">{goals.length}</div>
+                          <div className="text-xs text-slate-400 font-medium">Active Goals</div>
+                        </div>
+                        <div className="w-px h-10 bg-slate-200" />
+                        <div>
+                          <div className="text-2xl font-extrabold text-emerald-600">
+                            {allTodayTasks.filter((t) => t.completed).length}/{allTodayTasks.length}
+                          </div>
+                          <div className="text-xs text-slate-400 font-medium">Tasks Done Today</div>
+                        </div>
+                        <div className="w-px h-10 bg-slate-200" />
+                        <div>
+                          <div className="text-2xl font-extrabold text-slate-800">{overallProgress}%</div>
+                          <div className="text-xs text-slate-400 font-medium">Milestone Average</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Filter and Search Bar */}
+                    <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+                      <div className="relative w-full sm:w-72">
+                        <input
+                          type="text"
+                          placeholder="Search goals or descriptions..."
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          className="w-full text-xs bg-white border border-slate-200 rounded-xl pl-8 pr-3 py-2 text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+                        />
+                        <span className="absolute left-2.5 top-2.5 text-slate-400 text-xs">🔍</span>
+                      </div>
+
+                      <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto pb-1 custom-scrollbar">
+                        <span className="text-xs text-slate-400 font-medium flex-shrink-0">Category:</span>
+                        {categories.map((cat) => (
+                          <button
+                            key={cat}
+                            onClick={() => setSelectedCategory(cat)}
+                            className={`text-xs px-3 py-1 rounded-full font-medium capitalize whitespace-nowrap transition ${
+                              selectedCategory === cat
+                                ? 'bg-slate-900 text-white'
+                                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                            }`}
+                          >
+                            {cat}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Goals Grid */}
+                    {filteredGoals.length === 0 ? (
+                      <div className="text-center bg-white border border-slate-200 rounded-2xl p-12">
+                        <div className="text-4xl mb-2">🎯</div>
+                        <h3 className="text-base font-semibold text-slate-800">No matching goals found</h3>
+                        <p className="text-slate-400 text-sm max-w-sm mx-auto mt-1 mb-5">
+                          {searchQuery
+                            ? 'Try clearing your search query or create a new goal.'
+                            : isOwner
+                            ? 'Create your first goal to begin breaking down your roadmap.'
+                            : 'This client has no goals yet.'}
+                        </p>
+                        {isOwner && (
+                          <button
+                            onClick={() => setIsModalOpen(true)}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs px-4 py-2 rounded-xl cursor-pointer"
+                          >
+                            + Create New Goal
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                        {filteredGoals.map((goal) => {
+                          const totalM = goal.milestones ? goal.milestones.length : 0;
+                          const doneM = goal.milestones ? goal.milestones.filter((m) => m.completed).length : 0;
+                          const pct = totalM > 0 ? Math.round((doneM / totalM) * 100) : 0;
+                          const curKey = getCurrentMonthKey();
+                          const curMilestone =
+                            (goal.milestones && goal.milestones.find((m) => m.monthKey === curKey)) ||
+                            (goal.milestones && goal.milestones.find((m) => !m.completed)) ||
+                            (goal.milestones && goal.milestones[goal.milestones.length - 1]);
+
+                          const goalTodayTasks = (goal.tasks || []).filter((t) => t.date === todayDate);
+                          const doneTodayTasks = goalTodayTasks.filter((t) => t.completed).length;
+
+                          return (
+                            <div
+                              key={goal.id}
+                              onClick={() => {
+                                setSelectedGoalId(goal.id);
+                                setActiveTab('detail');
+                              }}
+                              className="group bg-white border border-slate-200/90 rounded-2xl p-5 hover:border-emerald-500/40 hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between"
+                            >
+                              <div>
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-md">
+                                    {goal.category || 'General'}
+                                  </span>
+                                  <span className="text-xs font-medium text-slate-400">
+                                    Target: {formatMonthKey(goal.targetDate)}
+                                  </span>
+                                </div>
+
+                                <h3 className="font-bold text-slate-900 text-base group-hover:text-emerald-700 transition-colors line-clamp-1 mb-1">
+                                  {goal.title}
+                                </h3>
+
+                                {goal.description && (
+                                  <p className="text-slate-500 text-xs line-clamp-2 leading-relaxed mb-4">
+                                    {goal.description}
+                                  </p>
+                                )}
+
+                                {/* Current milestone spotlight */}
+                                <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 mb-4">
+                                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+                                    <span>Current Horizon</span>
+                                    <span>{curMilestone ? formatMonthKey(curMilestone.monthKey) : ''}</span>
+                                  </div>
+                                  <div className="text-xs font-medium text-slate-800 flex items-start gap-2">
+                                    <span
+                                      className={`w-2 h-2 rounded-full mt-1 flex-shrink-0 ${
+                                        curMilestone?.completed ? 'bg-emerald-500' : 'bg-amber-500'
+                                      }`}
+                                    />
+                                    <span
+                                      className={`truncate ${
+                                        curMilestone?.completed ? 'line-through text-slate-400' : ''
+                                      }`}
+                                    >
+                                      {curMilestone ? curMilestone.title : 'No milestone'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="space-y-2 pt-2 border-t border-slate-100">
+                                <div className="flex justify-between items-center text-xs font-medium">
+                                  <span className="text-slate-400">
+                                    Milestones ({doneM}/{totalM})
+                                  </span>
+                                  <span className="text-slate-800 font-semibold">{pct}%</span>
+                                </div>
+                                <ProgressBar value={pct} height="h-1.5" />
+
+                                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
+                                  <span>Today's Actions</span>
+                                  <span className="font-semibold text-slate-700">
+                                    {doneTodayTasks}/{goalTodayTasks.length} completed
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* =========================================================
+                    VIEW 2: TODAY'S MASTER FOCUS (ALL GOALS)
+                   ========================================================= */}
+                {activeTab === 'today' && (
+                  <div className="space-y-6 animate-in">
+                    <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs flex items-center justify-between">
+                      <div>
+                        <h1 className="text-2xl font-bold text-slate-900">Today's Daily Master List</h1>
+                        <p className="text-slate-500 text-xs sm:text-sm mt-0.5">
+                          Consolidated daily tasks for{' '}
+                          {new Date().toLocaleDateString('en-US', {
+                            weekday: 'long',
+                            month: 'long',
+                            day: 'numeric',
+                            year: 'numeric',
+                          })}.
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-2xl font-extrabold text-emerald-600">
+                          {allTodayTasks.filter((t) => t.completed).length} / {allTodayTasks.length}
+                        </span>
+                        <div className="text-xs text-slate-400 font-medium">Tasks Completed</div>
+                      </div>
+                    </div>
+
+                    {/* Aggregated List */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-3">
+                      {allTodayTasks.length === 0 ? (
+                        <div className="text-center py-10 text-slate-400 text-sm">
+                          No tasks scheduled for today across your goals.
+                        </div>
+                      ) : (
+                        [...allTodayTasks]
+                          .sort((a, b) => Number(a.completed) - Number(b.completed))
+                          .map((task) => (
+                            <div
+                              key={task.id}
+                              className={`flex items-center justify-between p-3.5 rounded-xl border transition ${
+                                task.completed
+                                  ? 'bg-slate-50/70 border-slate-100 text-slate-400'
+                                  : 'bg-white border-slate-200 shadow-xs text-slate-800'
+                              }`}
+                            >
+                              <label className={`flex items-start gap-3 flex-1 min-w-0 pr-3 ${canEditTaskRecord(task.goalId, task) ? 'cursor-pointer' : 'cursor-default'}`}>
+                                <input
+                                  type="checkbox"
+                                  checked={task.completed}
+                                  disabled={!canEditTaskRecord(task.goalId, task)}
+                                  onChange={() => handleToggleTask(task.goalId, task.id)}
+                                  className="w-4 h-4 mt-0.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-40"
+                                />
+                                <div className="flex flex-col min-w-0">
+                                  <span
+                                    className={`text-sm ${
+                                      task.completed ? 'line-through text-slate-400' : 'font-medium'
+                                    }`}
+                                  >
+                                    {task.text}
+                                  </span>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.2 rounded">
+                                      {task.goalTitle}
+                                      {task.subcategoryName ? ` · ${task.subcategoryName}` : ''}
+                                    </span>
+                                    <PriorityBadge priority={task.priority} />
+                                  </div>
+                                </div>
+                              </label>
+                              {canEditTaskRecord(task.goalId, task) && (
+                                <button
+                                  onClick={() => handleDeleteTask(task.goalId, task.id)}
+                                  className="text-slate-300 hover:text-rose-500 p-1 text-xs transition"
+                                  title="Delete task"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* =========================================================
+                    VIEW 3: GOAL DETAIL (DAILY TASKS + MONTHLY MILESTONES)
+                   ========================================================= */}
+                {activeTab === 'detail' && currentGoal && (
+                  <div className="space-y-6 animate-in">
+                    {/* Top Goal Bar */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <button
+                              onClick={() => {
+                                setSelectedGoalId(null);
+                                setActiveTab('dashboard');
+                              }}
+                              className="text-xs font-semibold text-slate-500 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition cursor-pointer"
+                            >
+                              ← Back to Dashboard
+                            </button>
+                            <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-100">
+                              {currentGoal.category || 'General'}
+                            </span>
+                            <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg">
+                              Target: {formatFullMonth(currentGoal.targetDate)}
+                            </span>
+                          </div>
+                          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">{currentGoal.title}</h1>
+                          {currentGoal.description && (
+                            <p className="text-slate-600 text-sm mt-1 max-w-3xl leading-relaxed">
+                              {currentGoal.description}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 self-start">
+                          {isOwner && (
+                            <button
+                              onClick={() => handleDeleteGoal(currentGoal.id)}
+                              className="text-xs text-rose-600 hover:bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl transition font-medium cursor-pointer"
+                            >
+                              Delete Goal
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 2-Column Responsive Layout */}
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                      {/* LEFT: Daily Task Execution */}
+                      <div className="lg:col-span-6 space-y-6">
+                        <DailyTaskSection
+                          goal={currentGoal}
+                          isOwner={isOwner}
+                          professionalRole={professionalRole}
+                          canEditSubcategoryTasks={canEditSubcategoryTasks}
+                          onAddSubcategory={handleAddSubcategory}
+                          onRenameSubcategory={handleRenameSubcategory}
+                          onDeleteSubcategory={handleDeleteSubcategory}
+                          onSetSubcategoryRole={handleSetSubcategoryRole}
+                          onAddTask={handleAddTask}
+                          onToggleTask={handleToggleTask}
+                          onDeleteTask={handleDeleteTask}
+                        />
+                      </div>
+
+                      {/* RIGHT: Monthly Milestones Timeline */}
+                      <div className="lg:col-span-6 space-y-6">
+                        <MonthlyMilestoneSection
+                          goal={currentGoal}
+                          readOnly={!isOwner}
+                          onToggleMilestone={handleToggleMilestone}
+                          onUpdateMilestoneTitle={handleUpdateMilestoneTitle}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activeTab === 'connect' && (
+                  <CollaboratorsPanel
+                    user={user}
+                    profile={profile}
+                    incomingRequests={incomingRequests}
+                    outgoingRequests={outgoingRequests}
+                    clientList={clientList}
+                    connectNotice={connectNotice}
+                    workspaceUid={workspaceUid}
+                    onRequestAccess={handleRequestAccess}
+                    onApprove={handleApproveRequest}
+                    onDeny={handleDenyRequest}
+                    onRemove={handleRemoveCollaborator}
+                    onSwitchWorkspace={handleSwitchWorkspace}
+                  />
+                )}
+              </>
+            )}
+          </main>
+
+          {/* FOOTER */}
+          <footer className="border-t border-slate-200 bg-white py-6 mt-12">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
+              <div className="flex items-center gap-2">
+                <span>Goal Path App</span>
+                <span>•</span>
+                <span>Firestore Cloud Sync Active</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span>Logged in as: <span className="font-medium text-slate-700">{user.email}</span></span>
+              </div>
+            </div>
+          </footer>
+
+          {/* CREATE GOAL MODAL */}
+          <CreateGoalModal
+            isOpen={isModalOpen}
+            onClose={() => setIsModalOpen(false)}
+            onSave={handleCreateGoal}
+          />
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 6. SUB-SECTION MODULES
+    // ==========================================
+
+    function CollaboratorsPanel({
+      user,
+      profile,
+      incomingRequests,
+      outgoingRequests,
+      clientList,
+      connectNotice,
+      workspaceUid,
+      onRequestAccess,
+      onApprove,
+      onDeny,
+      onRemove,
+      onSwitchWorkspace,
+    }) {
+      const [codeInput, setCodeInput] = useState('');
+      const [role, setRole] = useState(PROFESSIONAL_ROLES[0]);
+      const [copied, setCopied] = useState(false);
+
+      const pendingIn = (incomingRequests || []).filter((r) => r.status === 'pending');
+      const pendingOut = (outgoingRequests || []).filter((r) => r.status === 'pending');
+      const collaborators = profile?.collaborators || [];
+
+      const copyCode = async () => {
+        if (!profile?.code) return;
+        try {
+          await navigator.clipboard.writeText(profile.code);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch (err) {
+          console.error(err);
+        }
+      };
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onRequestAccess(codeInput, role);
+      };
+
+      return (
+        <div className="space-y-6 animate-in max-w-3xl">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Collaborate</h1>
+            <p className="text-sm text-slate-500 mt-1">
+              Share your code with a trainer, doctor, or dietitian. They request access; you approve.
+              They can view your full plan and edit only the sub-categories you tag for their role.
+            </p>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">My Code</h2>
+            <p className="text-xs text-slate-400 mt-1 mb-4">Give this to a professional so they can request access to your account.</p>
+            <div className="flex items-center gap-3">
+              <div className="font-mono text-2xl tracking-[0.3em] font-bold text-slate-900 bg-slate-50 border border-slate-200 rounded-xl px-5 py-3">
+                {profile?.code || '••••••'}
+              </div>
+              <button
+                type="button"
+                onClick={copyCode}
+                disabled={!profile?.code}
+                className="text-xs font-semibold px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+              >
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Connect as Professional</h2>
+            <p className="text-xs text-slate-400 mt-1 mb-4">Enter a client’s code and the role you are requesting.</p>
+            <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                maxLength={6}
+                placeholder="ABC123"
+                value={codeInput}
+                onChange={(e) => setCodeInput(e.target.value.toUpperCase())}
+                className="sm:w-36 font-mono tracking-widest text-sm bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+              />
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                className="text-sm bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+              >
+                {PROFESSIONAL_ROLES.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold rounded-xl cursor-pointer"
+              >
+                Request access
+              </button>
+            </form>
+            {connectNotice && (
+              <p className={`text-xs mt-3 ${connectNotice.type === 'ok' ? 'text-emerald-700' : 'text-rose-600'}`}>
+                {connectNotice.text}
+              </p>
+            )}
+            {pendingOut.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-slate-100">
+                <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Your pending requests</p>
+                <ul className="space-y-1.5 text-sm text-slate-600">
+                  {pendingOut.map((r) => (
+                    <li key={r.id}>
+                      Code {r.toCode} · {r.role} · waiting
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Pending requests</h2>
+            <p className="text-xs text-slate-400 mt-1 mb-4">Professionals waiting for your approval.</p>
+            {pendingIn.length === 0 ? (
+              <p className="text-sm text-slate-400">No pending requests.</p>
+            ) : (
+              <ul className="space-y-3">
+                {pendingIn.map((r) => (
+                  <li key={r.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-slate-200 rounded-xl p-3.5">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">{r.fromName || r.fromEmail || 'Professional'}</div>
+                      <div className="text-xs text-slate-500">Requesting access as {r.role}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onApprove(r)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeny(r)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Deny
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Connected professionals</h2>
+            <p className="text-xs text-slate-400 mt-1 mb-4">People who can view your goals. They edit only sub-categories tagged with their role.</p>
+            {collaborators.length === 0 ? (
+              <p className="text-sm text-slate-400">None yet.</p>
+            ) : (
+              <ul className="space-y-3">
+                {collaborators.map((c) => (
+                  <li key={c.uid} className="flex items-center justify-between gap-3 border border-slate-200 rounded-xl p-3.5">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">{c.name || c.email || c.uid}</div>
+                      <div className="text-xs text-slate-500">{c.role}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemove(c.uid)}
+                      className="text-xs font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg cursor-pointer"
+                    >
+                      Remove access
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Clients I support</h2>
+            <p className="text-xs text-slate-400 mt-1 mb-4">Accounts that approved you as a professional.</p>
+            {clientList.length === 0 ? (
+              <p className="text-sm text-slate-400">You are not connected to any clients yet.</p>
+            ) : (
+              <ul className="space-y-3">
+                {clientList.map((c) => {
+                  const myRole = (c.collaborators || []).find((x) => x.uid === user.uid)?.role;
+                  const active = workspaceUid === c.id;
+                  return (
+                    <li key={c.id} className="flex items-center justify-between gap-3 border border-slate-200 rounded-xl p-3.5">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{c.displayName || c.email || 'Client'}</div>
+                        <div className="text-xs text-slate-500">Your role: {myRole || '—'}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onSwitchWorkspace(active ? user.uid : c.id)}
+                        className={`text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer ${
+                          active
+                            ? 'bg-slate-900 text-white'
+                            : 'border border-slate-200 text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        {active ? 'Viewing' : 'Open goals'}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function DailyTaskSection({
+      goal,
+      isOwner = true,
+      canEditSubcategoryTasks = () => true,
+      onAddSubcategory,
+      onRenameSubcategory,
+      onDeleteSubcategory,
+      onSetSubcategoryRole,
+      onAddTask,
+      onToggleTask,
+      onDeleteTask,
+    }) {
+      const [newSubName, setNewSubName] = useState('');
+      const [expandedIds, setExpandedIds] = useState({});
+
+      const todayStr = getTodayDateString();
+      const todayTasks = (goal.tasks || []).filter((t) => t.date === todayStr);
+      const subcategories = useMemo(() => {
+        return [...(goal.subcategories || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      }, [goal.subcategories]);
+
+      const uncategorizedTasks = useMemo(
+        () => todayTasks.filter((t) => !t.subcategoryId),
+        [todayTasks]
+      );
+
+      const toggleExpanded = (id) => {
+        setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+      };
+
+      const handleAddSub = async (e) => {
+        e.preventDefault();
+        if (!newSubName.trim()) return;
+        const id = await onAddSubcategory(goal.id, newSubName.trim());
+        setNewSubName('');
+        if (id) {
+          setExpandedIds((prev) => ({ ...prev, [id]: true }));
+        }
+      };
+
+      return (
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">Today's Daily Tasks</h2>
+              <p className="text-xs text-slate-400">
+                Expand a sub-category to reveal its task list
+              </p>
+            </div>
+            <span className="text-xs font-bold px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-full">
+              {todayTasks.filter((t) => t.completed).length}/{todayTasks.length} Completed
+            </span>
+          </div>
+
+          <div className="space-y-1.5">
+            {subcategories.length === 0 && uncategorizedTasks.length === 0 && (
+              <div className="text-center py-8 border border-dashed border-slate-200 rounded-xl text-slate-400 text-xs sm:text-sm mb-3">
+                Add a sub-category below, then expand it to add tasks.
+              </div>
+            )}
+
+            {uncategorizedTasks.length > 0 && (
+              <SubcategoryBlock
+                name="Uncategorized"
+                expanded={!!expandedIds.__uncategorized__}
+                onToggle={() => toggleExpanded('__uncategorized__')}
+                tasks={uncategorizedTasks}
+                goal={goal}
+                canDelete={false}
+                canAdd={false}
+                canRename={false}
+                canEditTasks={isOwner}
+                onToggleTask={onToggleTask}
+                onDeleteTask={onDeleteTask}
+              />
+            )}
+
+            {subcategories.map((sub) => {
+              const canEdit = canEditSubcategoryTasks(sub);
+              return (
+              <SubcategoryBlock
+                key={sub.id}
+                name={sub.name}
+                expanded={!!expandedIds[sub.id]}
+                onToggle={() => toggleExpanded(sub.id)}
+                onRename={(nextName) => onRenameSubcategory(goal.id, sub.id, nextName)}
+                onDelete={() => onDeleteSubcategory(goal.id, sub.id)}
+                tasks={todayTasks.filter((t) => t.subcategoryId === sub.id)}
+                goal={goal}
+                subcategoryId={sub.id}
+                editorRole={sub.editorRole || ''}
+                canDelete={isOwner}
+                canAdd={canEdit}
+                canRename={isOwner}
+                canEditTasks={canEdit}
+                onSetRole={
+                  isOwner && onSetSubcategoryRole
+                    ? (nextRole) => onSetSubcategoryRole(goal.id, sub.id, nextRole)
+                    : undefined
+                }
+                onAddTask={onAddTask}
+                onToggleTask={onToggleTask}
+                onDeleteTask={onDeleteTask}
+              />
+              );
+            })}
+          </div>
+
+          {isOwner && (
+          <form onSubmit={handleAddSub} className="mt-4 flex gap-2">
+            <input
+              type="text"
+              placeholder="New sub-category (e.g. Workout, Study)"
+              value={newSubName}
+              onChange={(e) => setNewSubName(e.target.value)}
+              className="flex-1 text-sm bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+            />
+            <button
+              type="submit"
+              disabled={!newSubName.trim()}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition cursor-pointer"
+            >
+              + Add
+            </button>
+          </form>
+          )}
+        </div>
+      );
+    }
+
+    function SubcategoryBlock({
+      name,
+      expanded,
+      onToggle,
+      onRename,
+      onDelete,
+      tasks,
+      goal,
+      subcategoryId,
+      editorRole = '',
+      canDelete,
+      canAdd,
+      canRename,
+      canEditTasks = true,
+      onSetRole,
+      onAddTask,
+      onToggleTask,
+      onDeleteTask,
+    }) {
+      const [text, setText] = useState('');
+      const [priority, setPriority] = useState('medium');
+      const [editing, setEditing] = useState(false);
+      const [editVal, setEditVal] = useState(name);
+
+      const sortedTasks = useMemo(() => {
+        return [...tasks].sort((a, b) => Number(a.completed) - Number(b.completed));
+      }, [tasks]);
+
+      const done = tasks.filter((t) => t.completed).length;
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        if (!text.trim() || !subcategoryId) return;
+        onAddTask(goal.id, text.trim(), priority, subcategoryId);
+        setText('');
+      };
+
+      const handleSaveRename = () => {
+        const next = editVal.trim();
+        if (next && next !== name && onRename) {
+          onRename(next);
+        } else {
+          setEditVal(name);
+        }
+        setEditing(false);
+      };
+
+      return (
+        <div className="rounded-xl border border-slate-200 overflow-hidden">
+          <div className="flex items-center gap-1 bg-slate-50/80 hover:bg-slate-50 transition">
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={expanded}
+              className="flex-shrink-0 flex items-center justify-center w-10 h-10 text-slate-500 cursor-pointer"
+              title={expanded ? 'Collapse' : 'Expand to see tasks'}
+            >
+              <span className="w-5 h-5 flex items-center justify-center text-[13px] font-bold text-slate-500 border border-slate-300 rounded bg-white">
+                {expanded ? '−' : '+'}
+              </span>
+            </button>
+            {editing ? (
+              <input
+                type="text"
+                value={editVal}
+                onChange={(e) => setEditVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleSaveRename();
+                  }
+                  if (e.key === 'Escape') {
+                    setEditVal(name);
+                    setEditing(false);
+                  }
+                }}
+                onBlur={handleSaveRename}
+                autoFocus
+                className="flex-1 min-w-0 text-sm font-semibold text-slate-800 bg-white border border-slate-300 rounded-lg px-2 py-1 mr-1 focus:outline-none focus:ring-1 focus:ring-emerald-600"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={onToggle}
+                className="flex-1 min-w-0 text-left py-2.5 pr-2 cursor-pointer"
+              >
+                <span className="block text-sm font-semibold text-slate-800 truncate">{name}</span>
+              </button>
+            )}
+            <span className="text-[11px] text-slate-400 font-medium flex-shrink-0 tabular-nums pr-1">
+              {done}/{tasks.length}
+            </span>
+            {onSetRole ? (
+              <select
+                value={editorRole || ''}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => onSetRole(e.target.value)}
+                className="text-[10px] text-slate-600 bg-white border border-slate-200 rounded-lg px-1.5 py-1 mr-1 max-w-[7.5rem] cursor-pointer"
+                title="Who can edit tasks here"
+              >
+                <option value="">Client only</option>
+                {PROFESSIONAL_ROLES.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+            ) : editorRole ? (
+              <span className="text-[10px] font-semibold text-slate-500 pr-1">{editorRole}</span>
+            ) : null}
+            {canRename && !editing && (
+              <button
+                type="button"
+                title="Rename"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditVal(name);
+                  setEditing(true);
+                }}
+                className="text-slate-300 hover:text-slate-600 px-1.5 py-2 text-xs cursor-pointer"
+              >
+                ✎
+              </button>
+            )}
+            {canDelete && (
+              <button
+                type="button"
+                title="Delete sub-category"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete();
+                }}
+                className="text-slate-300 hover:text-rose-500 px-2 py-2 text-xs cursor-pointer"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {expanded && (
+            <div className="border-t border-slate-200 p-3 space-y-2.5 bg-white">
+              {canAdd && (
+                <form onSubmit={handleSubmit} className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Add a task…"
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                      className="flex-1 text-sm bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-800 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!text.trim()}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition cursor-pointer"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                    <span>Priority:</span>
+                    <select
+                      value={priority}
+                      onChange={(e) => setPriority(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-slate-700 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs"
+                    >
+                      <option value="high">High Priority</option>
+                      <option value="medium">Medium Priority</option>
+                      <option value="low">Low Priority</option>
+                    </select>
+                  </div>
+                </form>
+              )}
+
+              {sortedTasks.length === 0 ? (
+                <div className="text-center py-5 text-slate-400 text-xs">
+                  {canAdd ? 'No tasks yet. Add one above.' : 'No tasks in this group.'}
+                </div>
+              ) : (
+                sortedTasks.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`flex items-start justify-between p-3 rounded-xl border transition ${
+                      t.completed
+                        ? 'bg-slate-50/80 border-slate-100 text-slate-400'
+                        : 'bg-white border-slate-200 text-slate-800 shadow-xs'
+                    }`}
+                  >
+                    <label className={`flex items-start gap-3 flex-1 min-w-0 pr-3 ${canEditTasks ? 'cursor-pointer' : 'cursor-default'}`}>
+                      <input
+                        type="checkbox"
+                        checked={t.completed}
+                        disabled={!canEditTasks}
+                        onChange={() => onToggleTask(goal.id, t.id)}
+                        className="w-4 h-4 mt-0.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-40"
+                      />
+                      <div className="flex flex-col min-w-0">
+                        <span
+                          className={`text-sm ${
+                            t.completed ? 'line-through text-slate-400' : 'font-medium'
+                          }`}
+                        >
+                          {t.text}
+                        </span>
+                        <div className="flex items-center gap-2 mt-1">
+                          <PriorityBadge priority={t.priority} />
+                        </div>
+                      </div>
+                    </label>
+                    {canEditTasks && (
+                    <button
+                      onClick={() => onDeleteTask(goal.id, t.id)}
+                      className="text-slate-300 hover:text-rose-500 p-1 text-xs transition cursor-pointer"
+                      title="Delete task"
+                    >
+                      ✕
+                    </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function MonthlyMilestoneSection({ goal, readOnly = false, onToggleMilestone, onUpdateMilestoneTitle }) {
+      const [editingId, setEditingId] = useState(null);
+      const [editVal, setEditVal] = useState('');
+      const currentMonthKey = getCurrentMonthKey();
+
+      const milestones = goal.milestones || [];
+      const total = milestones.length;
+      const completed = milestones.filter((m) => m.completed).length;
+      const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+      const handleStartEdit = (m) => {
+        setEditingId(m.id);
+        setEditVal(m.title);
+      };
+
+      const handleSaveEdit = (mId) => {
+        if (editVal.trim()) {
+          onUpdateMilestoneTitle(goal.id, mId, editVal.trim());
+        }
+        setEditingId(null);
+      };
+
+      return (
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">Monthly Milestones Roadmap</h2>
+              <p className="text-xs text-slate-400">Sequential horizons toward {formatFullMonth(goal.targetDate)}</p>
+            </div>
+            <div className="w-full sm:w-36">
+              <div className="flex justify-between text-xs text-slate-500 font-medium mb-1">
+                <span>Completed</span>
+                <span className="text-slate-900 font-bold">{pct}%</span>
+              </div>
+              <ProgressBar value={pct} height="h-2" />
+            </div>
+          </div>
+
+          <div className="relative pl-6 space-y-4 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200">
+            {milestones.map((m) => {
+              const isThisMonth = m.monthKey === currentMonthKey;
+              return (
+                <div key={m.id} className="relative group">
+                  <div
+                    className={`absolute -left-6 top-2 w-5 h-5 rounded-full border-2 bg-white flex items-center justify-center transition ${
+                      m.completed
+                        ? 'border-emerald-600 bg-emerald-600 text-white'
+                        : isThisMonth
+                        ? 'border-emerald-600 ring-4 ring-emerald-100'
+                        : 'border-slate-300'
+                    }`}
+                  >
+                    {m.completed && <span className="text-[10px] font-bold">✓</span>}
+                  </div>
+
+                  <div
+                    className={`p-4 rounded-xl border transition ${
+                      isThisMonth
+                        ? 'border-emerald-300 bg-emerald-50/25 shadow-xs'
+                        : m.completed
+                        ? 'border-slate-100 bg-slate-50/60'
+                        : 'border-slate-200 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                          {formatFullMonth(m.monthKey)}
+                        </span>
+                        {isThisMonth && (
+                          <span className="bg-emerald-100 text-emerald-800 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                            CURRENT MONTH
+                          </span>
+                        )}
+                      </div>
+                      {!readOnly && (
+                      <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={m.completed}
+                          onChange={() => onToggleMilestone(goal.id, m.id)}
+                          className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <span>{m.completed ? 'Achieved' : 'Mark Done'}</span>
+                      </label>
+                      )}
+                      {readOnly && (
+                        <span className="text-[10px] font-semibold text-slate-400">
+                          {m.completed ? 'Achieved' : 'Open'}
+                        </span>
+                      )}
+                    </div>
+
+                    {editingId === m.id ? (
+                      <div className="flex gap-2 mt-2">
+                        <input
+                          type="text"
+                          value={editVal}
+                          onChange={(e) => setEditVal(e.target.value)}
+                          className="flex-1 text-sm border border-slate-300 rounded-lg px-2.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => handleSaveEdit(m.id)}
+                          className="px-3 py-1 bg-emerald-600 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    ) : (
+                      <div
+                        onClick={() => { if (!readOnly) handleStartEdit(m); }}
+                        title={readOnly ? undefined : 'Click to rename this milestone'}
+                        className={`text-sm font-medium transition flex items-center justify-between ${
+                          readOnly ? '' : 'cursor-pointer hover:text-emerald-700'
+                        } ${
+                          m.completed ? 'line-through text-slate-400' : 'text-slate-800'
+                        }`}
+                      >
+                        <span>
+                          {m.title || <span className="italic text-slate-300">Name this milestone...</span>}
+                        </span>
+                        {!readOnly && (
+                        <span className="text-xs text-slate-300 hover:text-slate-600">✎</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function CreateGoalModal({ isOpen, onClose, onSave }) {
+      const [title, setTitle] = useState('');
+      const [category, setCategory] = useState('Career & Business');
+      const [description, setDescription] = useState('');
+      const [targetDate, setTargetDate] = useState('');
+      const [saving, setSaving] = useState(false);
+
+      if (!isOpen) return null;
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!title.trim() || !targetDate || saving) return;
+
+        setSaving(true);
+        try {
+          await onSave({
+            title: title.trim(),
+            category,
+            description: description.trim(),
+            targetDate,
+          });
+
+          setTitle('');
+          setDescription('');
+          setTargetDate('');
+          onClose();
+        } finally {
+          setSaving(false);
+        }
+      };
+
+      const minMonth = getCurrentMonthKey();
+
+      return (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
+            <div className="flex justify-between items-center mb-5">
+              <h3 className="text-lg font-bold text-slate-900">Define New Goal Path</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer">
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+                  Goal Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Launch New Mobile App"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+                    Category
+                  </label>
+                  <select
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                    className="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+                  >
+                    <option value="Career & Business">Career & Business</option>
+                    <option value="Health & Fitness">Health & Fitness</option>
+                    <option value="Creative Writing">Creative Writing</option>
+                    <option value="Finance & Wealth">Finance & Wealth</option>
+                    <option value="Learning & Skills">Learning & Skills</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+                    Target Month
+                  </label>
+                  <input
+                    type="month"
+                    required
+                    min={minMonth}
+                    value={targetDate}
+                    onChange={(e) => setTargetDate(e.target.value)}
+                    className="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+                  Description / Definition of Done
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="What does success look like once completed?"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600 resize-none"
+                />
+              </div>
+
+              <div className="flex gap-2 justify-end pt-3">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 font-medium text-sm rounded-xl transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold text-sm rounded-xl transition cursor-pointer"
+                >
+                  {saving ? 'Creating...' : 'Generate Roadmap'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function PreviewApp() {
+      const today = getTodayDateString();
+      const [goal, setGoal] = useState({
+        id: 'preview-goal',
+        title: 'Build healthier routines',
+        category: 'Health & Fitness',
+        targetDate: getCurrentMonthKey(),
+        milestones: [],
+        subcategories: [
+          { id: 'sc-1', name: 'Workout', order: 0 },
+          { id: 'sc-2', name: 'Study', order: 1 },
+        ],
+        tasks: [
+          {
+            id: 't-1',
+            subcategoryId: 'sc-1',
+            text: 'Gym — 45 min',
+            completed: false,
+            date: today,
+            priority: 'high',
+          },
+          {
+            id: 't-2',
+            subcategoryId: 'sc-2',
+            text: 'Spanish lesson',
+            completed: true,
+            date: today,
+            priority: 'medium',
+          },
+        ],
+      });
+
+      return (
+        <div className="min-h-screen bg-slate-50 text-slate-900 p-6">
+          <div className="max-w-xl mx-auto space-y-4">
+            <div className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+              Preview only — not saved to Firestore. Open without ?preview=1 to use the real app.
+            </div>
+            <h1 className="text-2xl font-bold">{goal.title}</h1>
+            <DailyTaskSection
+              goal={goal}
+              onAddSubcategory={async (_id, name) => {
+                const newId = `sc-${Date.now()}`;
+                setGoal((g) => ({
+                  ...g,
+                  subcategories: [
+                    ...(g.subcategories || []),
+                    { id: newId, name, order: (g.subcategories || []).length },
+                  ],
+                }));
+                return newId;
+              }}
+              onRenameSubcategory={async (_id, subcategoryId, name) => {
+                setGoal((g) => ({
+                  ...g,
+                  subcategories: g.subcategories.map((s) =>
+                    s.id === subcategoryId ? { ...s, name } : s
+                  ),
+                }));
+              }}
+              onDeleteSubcategory={async (_id, subcategoryId) => {
+                if (!confirm('Delete this sub-category and all of its tasks?')) return;
+                setGoal((g) => ({
+                  ...g,
+                  subcategories: g.subcategories.filter((s) => s.id !== subcategoryId),
+                  tasks: g.tasks.filter((t) => t.subcategoryId !== subcategoryId),
+                }));
+              }}
+              onAddTask={async (_id, text, priority, subcategoryId) => {
+                setGoal((g) => ({
+                  ...g,
+                  tasks: [
+                    {
+                      id: `t-${Date.now()}`,
+                      text,
+                      priority: priority || 'medium',
+                      completed: false,
+                      date: today,
+                      subcategoryId: subcategoryId || '',
+                    },
+                    ...g.tasks,
+                  ],
+                }));
+              }}
+              onToggleTask={async (_id, taskId) => {
+                setGoal((g) => ({
+                  ...g,
+                  tasks: g.tasks.map((t) =>
+                    t.id === taskId ? { ...t, completed: !t.completed } : t
+                  ),
+                }));
+              }}
+              onDeleteTask={async (_id, taskId) => {
+                setGoal((g) => ({
+                  ...g,
+                  tasks: g.tasks.filter((t) => t.id !== taskId),
+                }));
+              }}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    const isPreview = new URLSearchParams(window.location.search).has('preview');
+    root.render(isPreview ? <PreviewApp /> : <App />);
+  </script>
+</body>
+</html>
